@@ -1,0 +1,31 @@
+name: Call a reusable workflow
+
+on:
+  workflow_call:
+    inputs:
+      sp-id:
+        required: true
+        type: string
+      TENENT-ID:
+        required: true
+        type: string
+    secrets:
+      sp-secret:
+        required: true
+
+jobs:
+  call-model-deploy:
+    uses: ./.github/workflows/model_deploy.yml
+    with:
+      sp-id: ${{ vars.DEV_AZURE_SP_ID }}
+      TENENT-ID:  ${{ vars.TENENT_ID }}
+    secrets:
+      sp-secret: ${{ secrets.DEV_AZURE_SP_SECRET }}
+  
+  call-notebook-deploy:
+    uses: ./.github/workflows/notebook_deploy.yml
+    with:
+      sp-id: ${{ vars.DEV_AZURE_SP_ID }}
+      TENENT-ID:  ${{ vars.TENENT_ID }}
+    secrets:
+      sp-secret: ${{ secrets.DEV_AZURE_SP_SECRET }}
