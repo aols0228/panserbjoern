@@ -1,0 +1,84 @@
+# Forfatter: jsju0002
+# Link til kilde:
+# Beskrivelse:
+## yamlscript, der deployer Power BI-semantiske modeller med hjælp fra:
+## model_bundle.py
+## model_delete.py
+## model_download_te2.ps1
+# Changelog:
+# ---------------------------------------------------------------
+# Version | Dato       | Forfatter | Beskrivelse
+# 1.0.0     04-02-2025   jsju0002    Frigivelse af kode
+
+name: model_changes
+
+on:
+  # Triggeres ved push til model-deploy grenen og hvis filer i Model/** ændres
+  push:
+    branches:
+      - 'model-deploy'
+    paths:
+      - 'Model/**'
+
+env:
+  # Power BI workspace-URL – skal matche det i model_delete.py
+  PBI_WORKSPACE: 'powerbi://api.powerbi.com/v1.0/regionh.dk/sandbox_dap'
+  # Skabelon til at hente adgangstoken fra Azure AD
+  TOKEN_URL: "PBI_TOKEN=$(curl -X POST -H 'Content-Type: application/x-www-form-urlencoded' https://login.microsoftonline.com/{0}/oauth2/v2.0/token -d 'client_id={1}' -d 'grant_type=client_credentials' -d 'scope=https://analysis.windows.net/powerbi/api/.default' -d 'client_secret={2}' |  jq -r  '.access_token')"
+
+jobs:
+  find_changes:
+    runs-on: ubuntu-latest
+    outputs:
+      models_to_delete: ${{ steps.run_git_diff.outputs.models_to_delete }}
+      models_to_deploy: ${{ steps.run_git_diff.outputs.models_to_deploy }}
+    steps:
+      - name: Tjek kildekode ud
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Henter hele historikken, så git diff fungerer korrekt
+
+      - name: Tillad æøå i filnavne
+        run: git config core.quotepath off
+
+      - name: Find ændrede modeller med git diff
+        id: run_git_diff
+        run: python -u .github/workflows/model_bundle.py "$(git diff --name-status ${{ github.event.before }}..${{ github.event.after }})"
+
+  handle_delete:
+    if: ${{ needs.find_changes.outputs.models_to_delete != '[]' }}
+    runs-on: ubuntu-latest
+    needs: find_changes
+    strategy:
+      matrix:
+        model: ${{fromJson(needs.find_changes.outputs.models_to_delete)}}
+
+    steps:
+      - name: Tjek kildekode ud
+        uses: actions/checkout@v4
+
+      - name: Hent adgangstoken til Power BI
+        run: echo ${{ format(env.TOKEN_URL, vars.DAP_FABRIC_TENANT_ID, vars.DAP_FABRIC_PUBLISH_SP_ID, secrets.PBI_PUBLISH_SP_SECRET) }} >> $GITHUB_ENV
+
+      - name: Slet dataset i Power BI
+        run: python -u .github/workflows/model_delete.py "${{ matrix.model.name }}" "${{ env.PBI_TOKEN }}"
+
+  handle_deploy:
+    if: ${{ needs.find_changes.outputs.models_to_deploy != '[]' }}
+    runs-on: windows-latest
+    needs: find_changes
+    strategy:
+      matrix:
+        model: ${{fromJson(needs.find_changes.outputs.models_to_deploy)}}
+
+    steps:
+      - name: Tjek kildekode ud
+        uses: actions/checkout@v4
+
+      - name: Download Tabular Editor 2.x
+        shell: pwsh
+        run: .\.github\workflows\model_download_te2.ps1
+
+      - name: Deploy model til Power BI
+        shell: cmd
+        run: TabularEditor.exe .\Model\${{ matrix.model.domain }}\${{ matrix.model.name }}\database.json -D "Provider=MSOLAP;Data Source=${{ vars.DAP_FABRIC_WORKSPACE_API }};User ID=app:${{ vars.DAP_FABRIC_PUBLISH_SP_ID }}@${{ vars.DAP_FABRIC_TENANT_ID }};Password=${{ secrets.PBI_PUBLISH_SP_SECRET }}" ${{ matrix.model.name }} -O -C -G -E -W
