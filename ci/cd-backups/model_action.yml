@@ -1,0 +1,155 @@
+# Forfatter: aols0228
+# Link til kilde:
+#
+# Beskrivelse:
+# yamlscript, der deployer Power BI-semantiske modeller med hjælp fra:
+# model_changes.py
+# model_delete.py
+# model_download_te2.ps1
+#
+# Changelog:
+# ---------------------------------------------------------------
+# Version | Dato       | Forfatter | Beskrivelse
+# 0.1.0     04-02-2025   jsju0002    Frigivelse af kode
+# 0.2.0     05-06-2025   aols0228    Tilføjet håndtering af model name fra database.json og fleksibilitet vil at vælge mellem model name og folder name, når der deployes
+# 1.0.0     25-06-2025   aols0228    Produktionsklar til dataenheden - model_delete.py virker dog ikke endnu
+
+
+name: model_action
+
+on:
+  workflow_call:  # This makes the workflow reusable
+    inputs:
+      azure-client-id:
+        required: true
+        type: string
+      fabric-tenant-id:
+        required: true
+        type: string
+      fabric-client-id:
+        required: true
+        type: string
+    secrets:
+      azure-client-secret:
+        required: true
+
+env:
+  # Byg Fabric Workspace API
+  DAP_FABRIC_WORKSPACE_API: ${{ vars.DAP_FABRIC_WORKSPACE_URI }}${{ vars.DAP_FABRIC_WORKSPACE_NAME }}
+  # Skabelon til at hente adgangstoken fra Azure AD
+  ENTRA_TOKEN_URL: "PBI_TOKEN=$(curl -X POST -H 'Content-Type: application/x-www-form-urlencoded' https://login.microsoftonline.com/{0}/oauth2/v2.0/token -d 'client_id={1}' -d 'grant_type=client_credentials' -d 'scope=https://analysis.windows.net/powerbi/api/.default' -d 'client_secret={2}' |  jq -r  '.access_token')"
+
+jobs:
+  find_changes:
+    runs-on: ubuntu-latest
+    outputs:
+      models_to_delete: ${{ steps.run_git_diff.outputs.models_to_delete }}
+      models_to_deploy: ${{ steps.run_git_diff.outputs.models_to_deploy }}
+    steps:
+      - name: Checkout Caller Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch full history to allow for git diff before..after
+          # Fetch-depth 0 sikrer derved, at vi kan sammenligne ændringer mellem commits ved at fetche hele historikken.
+
+      - name: Checkout Shared-Tools from DAP-Shared-Workflows
+        uses: actions/checkout@v4
+        with:
+          repository: 'RegionH/DAP-Shared-Workflows'
+          path: 'Shared-Tools'
+
+      - name: Tillad non-ASCII filepaths med æ,ø,å
+        run: git config core.quotepath off
+
+      - name: Debug - Show directory tree
+        run: ls -R
+
+      - name: Find ændrede modeller med git diff
+        id: run_git_diff
+        run: python -u .github/workflows/model_changes.py "$(git diff --name-status ${{ github.event.before }}..${{ github.event.after }})"
+
+       
+
+  handle_delete:
+    if: ${{ needs.find_changes.outputs.models_to_delete != '[]' }}
+    runs-on: ubuntu-latest
+    needs: find_changes
+    strategy:
+      matrix:
+        model: ${{ fromJson(needs.find_changes.outputs.models_to_delete) }}
+
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@v4
+
+      - name: Checkout Shared-Tools from DAP-Shared-Workflows
+        uses: actions/checkout@v4
+        with:
+          repository: 'RegionH/DAP-Shared-Workflows'
+          path: 'Shared-Tools'
+
+      - name: Get access token for Fabric Workspace
+        run: echo ${{ format(env.ENTRA_TOKEN_URL, vars.MS_ENTRA_TENANT_ID, vars.ENTRA_SP_ID, secrets.ENTRA_SP_SECRET) }} >> $GITHUB_ENV
+
+      - name: Delete model in Fabric Workspace
+        run: python -u .github/workflows/model_delete.py "${{ matrix.model.name }}" "${{ env.ENTRA_TOKEN_URL }}"
+
+  handle_deploy:
+    if: ${{ needs.find_changes.outputs.models_to_deploy != '[]' }}
+    runs-on: windows-latest
+    needs: find_changes
+    strategy:
+      matrix:
+        model: ${{ fromJson(needs.find_changes.outputs.models_to_deploy) }}
+
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@v4
+
+      # Download Tabular Editor 2.##.# and save it to the current directory
+      - name: Download Tabular Editor 2.##.# (TE2)
+        shell: pwsh
+        run: .\.github\workflows\model_download_te2.ps1
+
+      - name: Show environment values
+        run: |
+          echo "DAP_FABRIC_WORKSPACE_API: ${{ env.DAP_FABRIC_WORKSPACE_API }}"
+
+      # Nedenstående opbygget ud fra: https://docs.tabulareditor.com/te2/Command-line-Options.html
+      # Vælg hvilket parameter du vil bruge herunder:
+      # - Brug model.folder hvis du vil bruge GitHub-mappenavn
+      # - Brug model.name hvis du vil bruge modelnavnet fra database.json
+      # Vi anvender powershell (pwsh) for at køre Tabular Editor 2-kommandoen, når der er danske bogstaver i workspace-API'et
+      # 
+
+      # powershell-version der desværre ikke virker
+      # - name: Deploy model with Tabular Editor 2 (PowerShell)
+      #   shell: pwsh
+      #   run: |
+      #     $TabularEditorPath = "TabularEditor.exe"
+      #     $ModelPath = "${{ matrix.model.path }}"
+      #     $Database = "${{ matrix.model.name }}"
+      #     $Server = "Provider=MSOLAP;Data Source=${{ env.DAP_FABRIC_WORKSPACE_API }};User ID=app:${{ vars.MICROSOFT_ENTRA_IDDAP_FABRIC_PUBLISH_SP_ID }}@${{ vars.DAP_FABRIC_TENANT_ID }};Password=${{ secrets.PBI_PUBLISH_SP_SECRET }}"
+      
+      #     $args = @(
+      #       $ModelPath,
+      #       "-S", ".github/workflows/catalog_production.cs", ".github/workflows/cluster_production.cs",
+      #       "-D", $Server,
+      #       $Database,
+      #       "-O", "-V", "-E", "-W"
+      #     )
+      
+      #     $p = Start-Process -FilePath $TabularEditorPath -ArgumentList $args -NoNewWindow -Wait -PassThru
+      
+      #     exit $p.ExitCode
+    
+
+
+      # cmd-version der virker
+      - name: Deploy model with Tabular Editor 2 (command line)
+        shell: cmd
+        run: >
+          TabularEditor.exe ${{ matrix.model.path }}
+          -S ".github/workflows/model_catalog.cs" ".github/workflows/model_cluster.cs"
+          -D "Provider=MSOLAP;Data Source=${{ env.DAP_FABRIC_WORKSPACE_API }};User ID=app:${{ vars.DAP_FABRIC_PUBLISH_SP_ID }}@${{ vars.MICROSOFT_ENTRA_ID }};Password=${{ secrets.PBI_PUBLISH_SP_SECRET }}" ${{ matrix.model.name }} -O -C -G -E -W
+    
