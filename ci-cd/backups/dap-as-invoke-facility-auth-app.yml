@@ -1,0 +1,45 @@
+name: Invoke GitHub App from Shared Workflow
+
+on:
+  workflow_call:
+    inputs:
+      facility_app_id:      { required: true,  type: string }
+      target_branch:        { required: false, type: string, default: dap-as-orchestrate-Alex }
+      fabric_workspace_uri: { required: true,  type: string }
+      entra_tenant_id:      { required: true,  type: string }
+      entra_sp_client_id:   { required: true,  type: string }
+      fabric_workspace_id:  { required: true,  type: string }
+      fabric_workspace_name: { required: true,  type: string }
+    secrets:
+      facility_app_private_key: { required: true }
+
+jobs:
+  invoke-app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint App token
+        id: mint_token
+        uses: RegionH/Shared-CompositeActions/dap/generate-app-token@v1.0.1
+        with:
+          facility_app_id: ${{ inputs.facility_app_id }}
+          facility_app_private_key: ${{ secrets.facility_app_private_key }}
+          target_repo_full_name: RegionH/Shared-ReusableWorkflows
+
+      - name: Confirm target branch exists
+        run: |
+          git ls-remote --heads \
+            https://x-access-token:${{ steps.mint_token.outputs.token }}@github.com/RegionH/Shared-ReusableWorkflows.git \
+            refs/heads/${{ inputs.target_branch }}
+
+      - name: Trigger orchestrate workflow
+        env:
+          GH_TOKEN: ${{ steps.mint_token.outputs.token }}
+        run: |
+          gh api -X POST \
+            repos/RegionH/Shared-ReusableWorkflows/actions/workflows/dap-as-orchestrate-pipeline-sandbox.yml/dispatches \
+            -f ref='${{ inputs.target_branch }}' \
+            -F inputs[entra_tenant_id]='${{ inputs.entra_tenant_id }}' \
+            -F inputs[entra_sp_client_id]='${{ inputs.entra_sp_client_id }}' \
+            -F inputs[fabric_workspace_id]='${{ inputs.fabric_workspace_id }}' \
+            -F inputs[fabric_workspace_uri]='${{ inputs.fabric_workspace_uri }}' \
+            -F inputs[fabric_workspace_name]='${{ inputs.fabric_workspace_name }}'
