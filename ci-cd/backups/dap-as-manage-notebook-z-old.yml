@@ -1,0 +1,163 @@
+# Forfatter: jsju0002
+# Link til kilde:
+# Beskrivelse:
+## yamlscript, der deployer notebooks med hjælp fra:
+## bundle_notebooks.py
+## createupdate_notebooks.py
+## delete_notebooks.py
+# Changelog:
+# ---------------------------------------------------------------
+# Version | Dato       | Forfatter | Beskrivelse
+# 1.0.0     04-02-2025   jsju0002    Frigivelse af kode
+
+name: notebook_changes
+
+on:
+  # workflow_dispatch:
+  push:
+    branches:
+      # - 'main'
+      - 'model-deploy2'
+    paths:
+      - 'Notebook/**'
+
+env:
+  TOKEN_URL: "DATABRICKS_TOKEN_{0}=$(curl -X POST -H 'Content-Type: application/x-www-form-urlencoded' https://login.microsoftonline.com/{1}/oauth2/v2.0/token -d 'client_id={2}' -d 'grant_type=client_credentials' -d 'scope=2ff814a6-3304-4ab8-85cb-cd0e6f879c1d%2F.default' -d 'client_secret={3}' |  jq -r  '.access_token')"
+  CLUSTER_PARAMS: "{\"num_workers\": 1, \"spark_version\": \"14.3.x-scala2.12\", \"node_type_id\": \"Standard_DS3_v2\"}"
+  ACCESS_LIST: "[{\"group_name\":\"AZU-B DAP-Core DataEngineer\",\"permission_level\":\"CAN_VIEW\"},{\"group_name\":\"AZU-B DAP-Core BAD DataModeler\",\"permission_level\":\"CAN_VIEW\"}]"
+
+jobs:
+  find_changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changed_notebooks: ${{steps.run_git_diff.outputs.changed_notebooks}}
+      deleted_notebooks: ${{steps.run_git_diff.outputs.deleted_notebooks}}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 #Fetch full history to allow for git diff before..after
+    - run: git config core.quotepath off # Allows for æ,ø,å in filepaths
+    - id: run_git_diff
+      run: echo "$(python -u .github/workflows/notebook_bundle.py "$(git diff --name-status ${{ github.event.before }}..${{ github.event.after }})")" >> "$GITHUB_OUTPUT"
+
+
+  handle_deleted: # håndterer slettede notebooks
+    if: ${{ needs.find_changes.outputs.deleted_notebooks != '[]' }}
+    runs-on: ubuntu-latest
+    needs: find_changes
+    strategy:
+      matrix:
+        notebook_path: ${{fromJson(needs.find_changes.outputs.deleted_notebooks)}}
+
+    steps: 
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.before }} # Checkout before ref to get deleted notebook
+    - name: Prepare temp notebooks
+      run: |
+        python .github/workflows/notebook_delete.py "${{ matrix.notebook_path }}"
+    
+    ############################################################## DEV ###############################################################
+    # - name: Get Dev Databricks Token
+    #   run: 
+    #     echo ${{ format(env.TOKEN_URL, 'DEV', secrets.TENENT_ID, secrets.DEV_AZURE_SP_ID, secrets.DEV_AZURE_SP_SECRET) }} >> $GITHUB_ENV
+    
+    # - name: Run Notebook on Dev
+    #   uses: databricks/run-notebook@f381bd756ae171a8f5a55b8dc5d5d760ef914daf
+    #   with:
+    #     databricks-host: https://adb-6501772386877222.2.azuredatabricks.net/
+    #     databricks-token: ${{ env.DATABRICKS_TOKEN_DEV }}
+    #     local-notebook-path: d_notebook.sql
+    #     workspace-temp-dir: /SP-Power-BI-Development/tmp
+    #     new-cluster-json: ${{ env.CLUSTER_PARAMS }}
+    #     access-control-list-json: ${{ env.ACCESS_LIST }}
+    
+    ############################################################## TEST ##############################################################
+    # - name: Get Test Databricks Token
+    #   run: 
+    #     echo ${{ format(env.TOKEN_URL, 'TEST', secrets.TENENT_ID, secrets.TEST_AZURE_SP_ID, secrets.TEST_AZURE_SP_SECRET) }} >> $GITHUB_ENV
+    
+    # - name: Run Notebook on Test
+    #   uses: databricks/run-notebook@f381bd756ae171a8f5a55b8dc5d5d760ef914daf
+    #   with:
+    #     databricks-host: https://adb-3428170089966232.12.azuredatabricks.net/
+    #     databricks-token: ${{ env.DATABRICKS_TOKEN_TEST }}
+    #     local-notebook-path: t_notebook.sql
+    #     workspace-temp-dir: /SP-Power-BI-Development/tmp
+    #     new-cluster-json: ${{ env.CLUSTER_PARAMS }}
+    #     access-control-list-json: ${{ env.ACCESS_LIST }}
+    
+    ############################################################## PROD ##############################################################
+    - name: Get Prod Databricks Token
+      run: 
+        echo ${{ format(env.TOKEN_URL, 'PROD', secrets.TENENT_ID, secrets.PROD_AZURE_SP_ID, secrets.PROD_AZURE_SP_SECRET) }} >> $GITHUB_ENV
+    
+    - name: Run Notebook on Prod
+      uses: databricks/run-notebook@f381bd756ae171a8f5a55b8dc5d5d760ef914daf
+      with:
+        databricks-host: https://adb-2776823572857644.4.azuredatabricks.net/
+        databricks-token: ${{ env.DATABRICKS_TOKEN_PROD }}
+        local-notebook-path: p_notebook.sql
+        workspace-temp-dir: /SP-Power-BI-Development/tmp
+        new-cluster-json: ${{ env.CLUSTER_PARAMS }}
+        access-control-list-json: ${{ env.ACCESS_LIST }}
+
+
+  handle_deploy:
+    if: always() && ( needs.find_changes.outputs.changed_notebooks != '[]' )
+    runs-on: ubuntu-latest
+    needs: [find_changes, handle_deleted]
+    strategy:
+      matrix:
+        notebook_path: ${{fromJson(needs.find_changes.outputs.changed_notebooks)}}
+    
+    steps:
+    - uses: actions/checkout@v4
+    - name: Prepare temp notebooks
+      run: |
+        python .github/workflows/notebook_create_update.py "${{ matrix.notebook_path }}"
+
+    ############################################################## DEV ###############################################################
+    # - name: Get Dev Databricks Token
+    #   run: 
+    #     echo ${{ format(env.TOKEN_URL, 'DEV', secrets.TENENT_ID, secrets.DEV_AZURE_SP_ID, secrets.DEV_AZURE_SP_SECRET) }} >> $GITHUB_ENV
+    
+    # - name: Run Notebook on Dev
+    #   uses: databricks/run-notebook@f381bd756ae171a8f5a55b8dc5d5d760ef914daf
+    #   with:
+    #     databricks-host: https://adb-6501772386877222.2.azuredatabricks.net/
+    #     databricks-token: ${{ env.DATABRICKS_TOKEN_DEV }}
+    #     local-notebook-path: d_notebook.sql
+    #     workspace-temp-dir: /SP-Power-BI-Development/tmp
+    #     new-cluster-json: ${{ env.CLUSTER_PARAMS }}
+    #     access-control-list-json: ${{ env.ACCESS_LIST }}
+    
+    ############################################################## TEST ##############################################################
+    # - name: Get Test Databricks Token
+    #   run: 
+    #     echo ${{ format(env.TOKEN_URL, 'TEST', secrets.TENENT_ID, secrets.TEST_AZURE_SP_ID, secrets.TEST_AZURE_SP_SECRET) }} >> $GITHUB_ENV
+    
+    # - name: Run Notebook on Test
+    #   uses: databricks/run-notebook@f381bd756ae171a8f5a55b8dc5d5d760ef914daf
+    #   with:
+    #     databricks-host: https://adb-3428170089966232.12.azuredatabricks.net/
+    #     databricks-token: ${{ env.DATABRICKS_TOKEN_TEST }}
+    #     local-notebook-path: t_notebook.sql
+    #     workspace-temp-dir: /SP-Power-BI-Development/tmp
+    #     new-cluster-json: ${{ env.CLUSTER_PARAMS }}
+    #     access-control-list-json: ${{ env.ACCESS_LIST }}
+    
+    ############################################################## PROD ##############################################################
+    - name: Get Prod Databricks Token
+      run: 
+        echo ${{ format(env.TOKEN_URL, 'PROD', secrets.TENENT_ID, secrets.PROD_AZURE_SP_ID, secrets.PROD_AZURE_SP_SECRET) }} >> $GITHUB_ENV
+    
+    - name: Run Notebook on Prod
+      uses: databricks/run-notebook@f381bd756ae171a8f5a55b8dc5d5d760ef914daf
+      with:
+        databricks-host: https://adb-2776823572857644.4.azuredatabricks.net/
+        databricks-token: ${{ env.DATABRICKS_TOKEN_PROD }}
+        local-notebook-path: p_notebook.sql
+        workspace-temp-dir: /SP-Power-BI-Development/tmp
+        new-cluster-json: ${{ env.CLUSTER_PARAMS }}
+        access-control-list-json: ${{ env.ACCESS_LIST }}
