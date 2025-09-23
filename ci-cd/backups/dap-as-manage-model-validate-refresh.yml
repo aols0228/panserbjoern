@@ -1,0 +1,195 @@
+# Forfatter: aols0228
+# Link til kilde:
+# Beskrivelse:
+## yamlscript, der deployer semantiske modeller med hjælp fra:
+## model_change.py
+## model_delete.py
+
+# Changelog:
+# ---------------------------------------------------------------
+# Version | Dato       | Forfatter | Beskrivelse
+# 1.0.0     04-02-2025   jsju0002    Frigivelse af kodename: manage-models
+
+description: | 
+  This workflow is used to trigger the model action workflow.
+
+on:
+  workflow_call:
+    inputs:
+      entra_tenant_id:            { required: true, type: string }
+      entra_sp_client_id:         { required: true, type: string }
+      fabric_workspace:           { required: true, type: string }
+      fabric_workspace_id:        { required: true, type: string }
+      databricks_catalog:         { required: true, type: string }
+      databricks_host:            { required: true, type: string }
+      databricks_host_domain:     { required: true, type: string }
+      github_app_id:              { required: true, type: string }
+      reusable_repo:              { required: true, type: string }
+      reusable_repo_path:         { required: true, type: string }
+      reusable_repo_branch:       { required: true, type: string }
+      reusable_repo_scripts:      { required: true, type: string }
+      scripts_path:               { required: true, type: string }
+      target_environment:         { required: true, type: string }
+      target_environment_prefix:  { required: true, type: string }
+    secrets:
+      entra_sp_client_secret:     { required: true }
+      github_app_private_key:     { required: true }
+
+jobs:
+  find_changes: # Konverterer git ændringer til deployment matrix for delete/deploy jobs
+    runs-on: ubuntu-latest
+    outputs:
+      models_to_delete:           ${{ steps.run_git_diff.outputs.models_to_delete }}
+      models_to_deploy:           ${{ steps.run_git_diff.outputs.models_to_deploy }}
+    steps:
+      - name: Setup home runner
+        uses: RegionH/Shared-CompositeActions/dap/shared/setup-caller-repo@DAP_FacilityAppTest_aols0228
+        with:
+          github_app_id:          ${{ inputs.github_app_id }}
+          github_app_private_key: ${{ secrets.github_app_private_key }}
+          reusable_repo:          ${{ inputs.reusable_repo }}
+          reusable_repo_path:     ${{ inputs.reusable_repo_path }}
+          reusable_repo_branch:   ${{ inputs.reusable_repo_branch }}
+
+      - name: Find changed models
+        id: run_git_diff
+        run: |
+          # Run a custom Python script to analyze changes between commits:
+          # This script parses the output of `git diff` to identify model files that should be deployed or deleted based on their status (A/M/D)
+          python -u ${{ inputs.scripts_path }}model-matrix.py "$(git diff --name-status ${{ github.event.before }}..${{ github.event.after }})"
+
+  delete:
+    if: needs.find_changes.outputs.models_to_delete != '' && needs.find_changes.outputs.models_to_delete != '[]'
+    runs-on: ubuntu-latest
+    needs: find_changes
+    environment: ${{ inputs.target_environment }}
+    strategy:
+      matrix:
+        model: ${{ fromJson(needs.find_changes.outputs.models_to_delete) }}
+
+    steps:
+      - name: Setup home runner
+        uses: RegionH/Shared-CompositeActions/dap/shared/setup-caller-repo@DAP_FacilityAppTest_aols0228
+        with:
+          github_app_id:          ${{ inputs.github_app_id }}
+          github_app_private_key: ${{ secrets.github_app_private_key }}
+          reusable_repo:          ${{ inputs.reusable_repo }}
+          reusable_repo_path:     ${{ inputs.reusable_repo_path }}
+          reusable_repo_branch:   ${{ inputs.reusable_repo_branch }}
+          caller_repo_ref:        ${{ github.event.before }}
+
+      - name: Generate MS Entra Token for delete operations
+        id: generate-token
+        uses: RegionH/Shared-CompositeActions/dap/shared/generate-token-for-entra@DAP_FacilityAppTest_aols0228
+        with:
+          scope_type:             fabric
+          target_environment:     ${{ inputs.target_environment }}
+          entra_tenant_id:        ${{ inputs.entra_tenant_id }}
+          entra_sp_client_id:     ${{ inputs.entra_sp_client_id }}
+          entra_sp_client_secret: ${{ secrets.entra_sp_client_secret }}
+
+      - name: Delete model
+        run: python -u ${{ inputs.scripts_path }}model-api.py
+        env:
+          MODEL_OPERATION:        delete
+          MODEL_NAME:             ${{ matrix.model.name }}
+          ENTRA_TOKEN:            ${{ env.entra_token }}
+          FABRIC_WORKSPACE:       ${{ inputs.fabric_workspace }}
+          FABRIC_WORKSPACE_ID:    ${{ inputs.fabric_workspace_id }}
+
+  deploy:
+    if: needs.find_changes.outputs.models_to_deploy != '[]' && needs.find_changes.outputs.models_to_deploy != '' && always()
+    runs-on: windows-latest
+    needs: find_changes
+    environment: ${{ inputs.target_environment }}
+    strategy:
+      matrix:
+        model: ${{ fromJson(needs.find_changes.outputs.models_to_deploy) }}
+
+    steps:
+      - name: Setup home runner
+        uses: RegionH/Shared-CompositeActions/dap/shared/setup-caller-repo@DAP_FacilityAppTest_aols0228
+        with:
+          github_app_id:          ${{ inputs.github_app_id }}
+          github_app_private_key: ${{ secrets.github_app_private_key }}
+          reusable_repo:          ${{ inputs.reusable_repo }}
+          reusable_repo_path:     ${{ inputs.reusable_repo_path }}
+          reusable_repo_branch:   ${{ inputs.reusable_repo_branch }}
+
+      - name: Download Tabular Editor 2 command line tool
+        shell: pwsh
+        run: ${{ inputs.scripts_path }}model-download-te2.ps1
+
+      - name: Deploy model with Tabular Editor 2 command line tool
+        shell: cmd
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+          TARGET_ENVIRONMENT_PREFIX: ${{ inputs.target_environment_prefix }}
+          DATABRICKS_HOST: ${{ inputs.databricks_host }}
+          DATABRICKS_HOST_DOMAIN: ${{ inputs.databricks_host_domain }}
+          DATABRICKS_CATALOG: ${{ inputs.databricks_catalog }}
+          FABRIC_WORKSPACE_URI: "powerbi://api.powerbi.com/v1.0/myorg/"
+        run: |
+          TabularEditor.exe ${{ matrix.model.path }} ^
+            -S "${{ inputs.scripts_path }}model-shared-expressions.cs" ^
+            -D "Provider=MSOLAP;Data Source=${{ env.FABRIC_WORKSPACE_URI }}${{ inputs.fabric_workspace }};User ID=app:${{ inputs.entra_sp_client_id }}@${{ inputs.entra_tenant_id }};Password=${{ secrets.entra_sp_client_secret }}" ${{ matrix.model.name }} ^
+            -O -C -G -E -W
+      
+      - name: Show deployment status
+        run: |
+          echo "✅ Model ${{ matrix.model.name }} deployed successfully."
+          echo "Model Name: ${{ matrix.model.name }}"
+          echo "Model Path: ${{ matrix.model.path }}"
+          echo "Deployed at: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "Deployed by: ${{ github.actor }}"
+
+      - name: Generate MS Entra Token for refresh operations
+        id: generate-token-refresh
+        uses: RegionH/Shared-CompositeActions/dap/shared/generate-token-for-entra@DAP_FacilityAppTest_aols0228
+        with:
+          scope_type:             fabric
+          target_environment:     ${{ inputs.target_environment }}
+          entra_tenant_id:        ${{ inputs.entra_tenant_id }}
+          entra_sp_client_id:     ${{ inputs.entra_sp_client_id }}
+          entra_sp_client_secret: ${{ secrets.entra_sp_client_secret }}
+
+      - name: Refresh model
+        run: python -u ${{ inputs.scripts_path }}model-api.py
+        env:
+          MODEL_OPERATION:        refresh
+          MODEL_NAME:             ${{ matrix.model.name }}
+          ENTRA_TOKEN:            ${{ env.entra_token }}
+          FABRIC_WORKSPACE:       ${{ inputs.fabric_workspace }}
+          FABRIC_WORKSPACE_ID:    ${{ inputs.fabric_workspace_id }}
+
+      # - name: Validate refresh (first attempt)
+      #   id: validate-first
+      #   continue-on-error: true
+      #   run: python -u ${{ inputs.scripts_path }}model-api.py
+      #   env:
+      #     MODEL_OPERATION:        validate_refresh
+      #     MODEL_NAME:             ${{ matrix.model.name }}
+      #     ENTRA_TOKEN:            ${{ env.entra_token }}
+      #     FABRIC_WORKSPACE:       ${{ inputs.fabric_workspace }}
+      #     FABRIC_WORKSPACE_ID:    ${{ inputs.fabric_workspace_id }}
+
+      # - name: Regenerate token if validation failed
+      #   id: regenerate-token
+      #   if: steps.validate-first.outcome == 'failure'
+      #   uses: RegionH/Shared-CompositeActions/dap/shared/generate-token-for-entra@DAP_FacilityAppTest_aols0228
+      #   with:
+      #     scope_type:             fabric
+      #     target_environment:     ${{ inputs.target_environment }}
+      #     entra_tenant_id:        ${{ inputs.entra_tenant_id }}
+      #     entra_sp_client_id:     ${{ inputs.entra_sp_client_id }}
+      #     entra_sp_client_secret: ${{ secrets.entra_sp_client_secret }}
+
+      # - name: Validate refresh (retry with new token)
+      #   if: steps.validate-first.outcome == 'failure'
+      #   run: python -u ${{ inputs.scripts_path }}model-api.py
+      #   env:
+      #     MODEL_OPERATION:        validate_refresh
+      #     MODEL_NAME:             ${{ matrix.model.name }}
+      #     ENTRA_TOKEN:            ${{ env.entra_token }}
+      #     FABRIC_WORKSPACE:       ${{ inputs.fabric_workspace }}
+      #     FABRIC_WORKSPACE_ID:    ${{ inputs.fabric_workspace_id }}
